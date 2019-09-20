@@ -7,8 +7,7 @@ using namespace std;
 TcpServer::TcpServer()
     : is_started(false), max_client(DEFAULT_CLIENT_COUNT),
       on_new_client(nullptr), on_client_disconnected(nullptr),
-      on_payload_received(nullptr), on_error(nullptr),
-      on_warning(nullptr)
+      on_payload_received(nullptr)
 {
 }
 
@@ -39,24 +38,15 @@ void TcpServer::setOnPayloadReceived(const function<void (int, const uint8_t *, 
     on_payload_received = method_in;
 }
 
-void TcpServer::setOnError(const function<void (string)> &method_in)
-{
-    on_error = method_in;
-}
-
-void TcpServer::setOnWarning(const function<void (string)> &method_in)
-{
-    on_warning = method_in;
-}
 
 /***** Public Method *****/
-TcpServer::Status::Id TcpServer::start(uint16_t port_in)
+int TcpServer::start(uint16_t port_in)
 {
     // Check proxy is already started
     if (is_started)
         return Status::BAD_REQUEST;
 
-    // Initialize local variable
+    // Initialize local variables
     is_started = true;
     port = port_in;
     source_address = INADDR_ANY;
@@ -65,13 +55,13 @@ TcpServer::Status::Id TcpServer::start(uint16_t port_in)
     return startServer();
 }
 
-TcpServer::Status::Id TcpServer::start(uint16_t port_in, in_addr_t source_address_in)
+int TcpServer::start(uint16_t port_in, in_addr_t source_address_in)
 {
     // Check proxy is already started
     if (is_started)
         return Status::BAD_REQUEST;
 
-    // Initialize local variable
+    // Initialize local variables
     is_started = true;
     port = port_in;
     source_address = source_address_in;
@@ -80,13 +70,13 @@ TcpServer::Status::Id TcpServer::start(uint16_t port_in, in_addr_t source_addres
     return startServer();
 }
 
-TcpServer::Status::Id TcpServer::start(uint16_t port_in, int max_client_in)
+int TcpServer::start(uint16_t port_in, int max_client_in)
 {
     // Check proxy is already started
     if (is_started)
         return Status::BAD_REQUEST;
 
-    // Initialize local variable
+    // Initialize local variables
     is_started = true;
     port = port_in;
     source_address = INADDR_ANY;
@@ -95,13 +85,13 @@ TcpServer::Status::Id TcpServer::start(uint16_t port_in, int max_client_in)
     return startServer();
 }
 
-TcpServer::Status::Id TcpServer::start(uint16_t port_in, in_addr_t source_address_in, int max_client_in)
+int TcpServer::start(uint16_t port_in, in_addr_t source_address_in, int max_client_in)
 {
     // Check proxy is already started
     if (is_started)
         return Status::BAD_REQUEST;
 
-    // Initialize local variable
+    // Initialize local variables
     is_started = true;
     port = port_in;
     source_address = source_address_in;
@@ -110,24 +100,27 @@ TcpServer::Status::Id TcpServer::start(uint16_t port_in, in_addr_t source_addres
     return startServer();
 }
 
-TcpServer::Status::Id TcpServer::stop() {
+int TcpServer::stop() {
     // Check proxy is already stopped
     if (!is_started)
         return Status::BAD_REQUEST;
 
     is_started = false;
 
-    destroyRelaySocket();
+    destroySocket();
+
+    return Status::SUCCESS;
 }
 
-void TcpServer::disconnectClient(int client_socket)
+int TcpServer::disconnectClient(int client_socket)
 {
+    if (clients.find(client_socket) == clients.end())
+        return Status::BAD_REQUEST;
+
+    clients.erase(client_socket);
     close(client_socket);
 
-    if (clients.find(client_socket) != clients.end())
-        clients.erase(client_socket);
-
-    onClientDisconnected(client_socket);
+    return Status::SUCCESS;
 }
 
 ssize_t TcpServer::sendToClient(int client_socket, const uint8_t *payload, ssize_t payload_size)
@@ -140,16 +133,17 @@ ssize_t TcpServer::sendToClient(int client_socket, const uint8_t *payload, ssize
 
 
 /***** Private Method *****/
-TcpServer::TcpServer::Status::Id TcpServer::startServer()
+int TcpServer::startServer()
 {
-    Status::Id status;
+    int status;
 
     // Initialize Socket
-    if ((status = initializeRelaySocket()) != Status::SUCCESS)
-        return status;
+    status = createSocket();
 
-    // Start connection thread
-    connect_thread = thread(&TcpServer::connectAction, this);
+    if (status == Status::SUCCESS)
+        connect_thread = thread(&TcpServer::connectAction, this);
+
+    return status;
 }
 
 
@@ -172,21 +166,9 @@ void TcpServer::onPayloadReceived(int client_socket, const uint8_t *payload, con
         on_payload_received(client_socket, payload, receive_size);
 }
 
-void TcpServer::onError(string message)
-{
-    if (on_error != nullptr)
-        on_error(message);
-}
-
-void TcpServer::onWarning(string message)
-{
-    if (on_warning != nullptr)
-        on_warning(message);
-}
-
 
 /***** Private Method *****/
-TcpServer::Status::Id TcpServer::initializeRelaySocket()
+int TcpServer::createSocket()
 {
     // Create socket
     relay_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -208,10 +190,14 @@ TcpServer::Status::Id TcpServer::initializeRelaySocket()
     if(bind(relay_socket, reinterpret_cast<sockaddr*>(&server_address), sizeof(server_address)) < 0)
         return Status::FAIL_SOCKET_BIND;
 
+    // Enable socket listen
+    if (listen(relay_socket, max_client) < 0)
+        return Status::FAIL_SOCKET_LISTEN;
+
     return Status::SUCCESS;
 }
 
-void TcpServer::destroyRelaySocket()
+void TcpServer::destroySocket()
 {
     close(relay_socket);
 }
@@ -221,21 +207,13 @@ void TcpServer::destroyRelaySocket()
 void TcpServer::connectAction()
 {
     while (is_started) {
-        // Listen new connection from socket
-        if (listen(relay_socket, max_client) < 0) {
-            onError("Cannot listen from socket");
-            break;
-        }
-
         // Accept connection from socket
         sockaddr_in client_address_in;
         int client_address_size = sizeof(client_address_in);
         int client_socket = accept(relay_socket, reinterpret_cast<sockaddr*>(&client_address_in),
                                    reinterpret_cast<socklen_t*>(&client_address_size));
-        if(client_socket < 0) {
-            onWarning("Client socket accept failed");
+        if(client_socket < 0)
             continue;
-        }
 
         sockaddr *client_address = reinterpret_cast<sockaddr*>(&client_address_in);
 
@@ -257,14 +235,10 @@ void TcpServer::listenAction(int client_socket)
 
         memset(&buffer, 0, 1500);
 
-        if((receive_size = recv(client_socket, buffer, sizeof(buffer), 0)) > 0)
+        receive_size = recv(client_socket, buffer, sizeof(buffer), 0);
+        if(receive_size > 0)
             onPayloadReceived(client_socket, reinterpret_cast<uint8_t*>(buffer), receive_size);
         else if(receive_size < 0){
-            disconnectClient(client_socket);
-            break;
-        }
-        else {
-            onWarning("Receive failed from client socket " + to_string(client_socket));
             disconnectClient(client_socket);
             break;
         }
